@@ -22,7 +22,13 @@ import os
 import re
 import uuid
 from contextlib import asynccontextmanager
+from datetime import datetime
 from pathlib import Path
+
+from dotenv import load_dotenv
+
+# Load environment variables from .env file immediately
+load_dotenv()
 
 import aiofiles
 import pandas as pd
@@ -31,15 +37,16 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from guardrails import sanitize_report_output, validate_csv_upload, validate_query
-from llm_client import build_graph
-from memory import memory_manager
-from models import (
-    AnalysisRequest,
+from src.guardrails import sanitize_report_output, validate_csv_upload, validate_query
+from src.llm_client import build_graph
+from src.memory import memory_manager
+from src.models import (
     AnalysisResponse,
     ColumnDescriptionResponse,
+    EmailRequest,
     HealthResponse,
 )
+from src.email_utils import send_email_report
 
 # ─────────────────────────────────────────────
 # Logging setup
@@ -262,11 +269,18 @@ async def analyze(
         "Python_script_check": 0,
         "max_Python_script_check": max_retries,
         "script_security_issues": None,
-        "next_node": None,
         "is_safe": None,
         "_terminate_workflow": False,
         "conversation_history": conversation_history,   # Memory injection
+        "image_output_dir": None,                       # To be set below
     }
+
+    # 5.5 Create session-specific image directory
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    session_image_dir_name = f"{timestamp}_{session_id}"
+    session_image_dir = IMAGES_DIR / session_image_dir_name
+    session_image_dir.mkdir(parents=True, exist_ok=True)
+    initial_state["image_output_dir"] = session_image_dir_name
 
     # 6. Run the LangGraph workflow
     try:
@@ -284,7 +298,9 @@ async def analyze(
     success = "execution_error" not in results or results.get("reports") is not None
 
     # 8. Apply output guardrail (sanitize the report)
+    logger.info(f"Report before sanitization:\n{report[:500]}...")
     report = sanitize_report_output(report)
+    logger.info(f"Report after sanitization:\n{report[:500]}...")
 
     # 9. Save this turn to memory
     if success and report:
@@ -334,9 +350,40 @@ def describe_csv(file_id: str):
 def clear_session(session_id: str):
     """
     Clear the conversation history for a session.
-
-    Call this when the user wants to start a fresh conversation
-    without uploading a new CSV.
     """
     memory_manager.clear_session(session_id)
     return {"message": f"Session '{session_id}' cleared."}
+
+
+@app.post("/email-report", tags=["Analysis"])
+async def email_report(request: EmailRequest):
+    """
+    Send the latest report from a session to an email address.
+    """
+    context = memory_manager.get_context(request.session_id)
+    if not context:
+        raise HTTPException(status_code=404, detail="No analysis found for this session.")
+
+    # Memory stores as "Q: ... A: ..."
+    # We want the last answer (A:).
+    parts = context.split("A:")
+    if len(parts) < 2:
+        # Fallback: maybe it's the first question and history isn't fully formatted
+        # or it's a direct match.
+        last_report = context.strip()
+    else:
+        last_report = parts[-1].strip()
+
+    if not last_report or last_report == "[Previous conversation context]":
+        raise HTTPException(status_code=404, detail="No report content found to email.")
+
+    try:
+        send_email_report(
+            to_email=request.email,
+            subject=f"Analysis Report: {request.session_id[:8]}",
+            report_markdown=last_report
+        )
+        return {"message": f"Report sent successfully to {request.email}"}
+    except Exception as e:
+        logger.error(f"Failed to email report: {e}")
+        raise HTTPException(status_code=500, detail=str(e))

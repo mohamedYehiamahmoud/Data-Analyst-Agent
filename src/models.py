@@ -12,10 +12,9 @@ Why Pydantic?
   - Structured LLM output: we tell the LLM "respond as this schema"
 """
 
-from typing import Optional
+from typing import Optional, TypedDict
 from pydantic import BaseModel, Field
 import pandas as pd
-from typing import TypedDict
 
 
 # ─────────────────────────────────────────────
@@ -27,11 +26,9 @@ from typing import TypedDict
 class AnalysisRequest(BaseModel):
     """
     What the client sends when asking a question.
-    The CSV is uploaded separately as a file, so only
-    the question text needs to be in the JSON body.
     """
     query: str = Field(
-        ...,                          # "..." means this field is required
+        ...,
         min_length=3,
         max_length=1000,
         description="The data analysis question to answer.",
@@ -39,10 +36,18 @@ class AnalysisRequest(BaseModel):
     )
     max_retries: int = Field(
         default=5,
-        ge=1,                         # ge = greater-than-or-equal
+        ge=1,
         le=10,
         description="Max times to retry generating code on failure.",
     )
+
+
+class EmailRequest(BaseModel):
+    """
+    Request body for sending a report via email.
+    """
+    session_id: str
+    email: str = Field(..., description="Recipient email address.")
 
 
 class AnalysisResponse(BaseModel):
@@ -60,8 +65,7 @@ class AnalysisResponse(BaseModel):
 
 class ColumnDescriptionResponse(BaseModel):
     """
-    Returned by the /describe endpoint so the user can
-    understand what columns are in their CSV before querying.
+    Returned by the /describe endpoint.
     """
     columns: dict[str, str] = Field(
         description="Column name → human-readable description."
@@ -77,8 +81,6 @@ class HealthResponse(BaseModel):
 
 # ─────────────────────────────────────────────
 # LLM Structured Output Schemas
-# These tell the LLM exactly what JSON shape
-# to return when we use structured output mode.
 # ─────────────────────────────────────────────
 
 class RelevancyGrade(BaseModel):
@@ -94,7 +96,6 @@ class RelevancyGrade(BaseModel):
 class SanitizingResult(BaseModel):
     """
     The LLM uses this when checking if generated Python code is safe.
-    We don't want generated code to delete files or call the internet!
     """
     is_safe: bool = Field(description="True if the Python script is safe to execute.")
     reason: str = Field(description="Explanation of any safety concerns found.")
@@ -102,18 +103,11 @@ class SanitizingResult(BaseModel):
 
 # ─────────────────────────────────────────────
 # LangGraph Agent State
-# LangGraph passes this dictionary between every
-# node (step) in the workflow. Think of it as a
-# shared whiteboard that all steps can read/write.
 # ─────────────────────────────────────────────
 
 class AgentState(TypedDict):
     """
     The shared state that flows through the LangGraph workflow.
-
-    Each node receives this state, does its work, and returns
-    a *partial* dict of only the keys it changed.
-    LangGraph merges that partial dict back into the full state.
     """
     query: str                              # Original user question
     csv_file_path: str                      # Path to the uploaded CSV on disk
@@ -130,3 +124,5 @@ class AgentState(TypedDict):
     next_node: Optional[str]              # Used by conditional router
     is_safe: Optional[bool]               # Result of security check
     _terminate_workflow: Optional[bool]    # Signals the graph to stop early
+    conversation_history: Optional[str]   # Memory injection
+    image_output_dir: Optional[str]       # Session-specific directory for images

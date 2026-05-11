@@ -146,6 +146,17 @@ def describe_file(file_id: str) -> dict:
     return r.json()
 
 
+def send_email(session_id: str, email: str) -> dict:
+    """Send the last report via email."""
+    r = requests.post(
+        f"{API_BASE}/email-report",
+        json={"session_id": session_id, "email": email},
+        timeout=30,
+    )
+    r.raise_for_status()
+    return r.json()
+
+
 def clear_session(session_id: str):
     """Tell the backend to clear conversation history for this session."""
     try:
@@ -472,3 +483,24 @@ else:
                     })
 
             st.rerun()
+
+    # ── Email Report ──
+    if st.session_state.chat_history:
+        st.divider()
+        st.markdown("### 📧 Email this Report")
+        col1, col2 = st.columns([3, 1])
+        with col1:
+            email_addr = st.text_input("Enter email address:", placeholder="your@email.com", label_visibility="collapsed")
+        with col2:
+            if st.button("✉️ Send Report", use_container_width=True):
+                if not email_addr:
+                    st.warning("Please enter an email.")
+                elif "@" not in email_addr:
+                    st.error("Invalid email address.")
+                else:
+                    with st.spinner("Sending..."):
+                        try:
+                            send_email(st.session_state.session_id, email_addr)
+                            st.success("✅ Report sent!")
+                        except Exception as e:
+                            st.error(f"Failed to send: {e}")

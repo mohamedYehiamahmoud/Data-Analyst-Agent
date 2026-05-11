@@ -42,6 +42,11 @@ import logging
 import uuid
 from typing import Literal, Optional
 
+from dotenv import load_dotenv
+
+# Load environment variables early
+load_dotenv()
+
 import pandas as pd
 from groq import RateLimitError
 from langchain_core.messages import SystemMessage, HumanMessage
@@ -56,8 +61,8 @@ from langchain_experimental.tools.python.tool import PythonAstREPLTool
 from langchain_groq import ChatGroq
 from langgraph.graph import END, START, StateGraph
 
-from guardrails import validate_generated_code
-from models import AgentState, RelevancyGrade, SanitizingResult
+from .guardrails import validate_generated_code
+from .models import AgentState, RelevancyGrade, SanitizingResult
 
 logger = logging.getLogger(__name__)
 
@@ -126,7 +131,7 @@ Rules:
 - The DataFrame is already loaded as the variable `df`. Do NOT reload the CSV.
 - Use ONLY pandas, matplotlib, seaborn, and uuid — no other libraries.
 - Always handle missing values (dropna or fillna) before calculations.
-- For any chart: use matplotlib/seaborn, save with a unique uuid filename to the 'images/' folder, then call plt.close() to free memory.
+- For any chart: use matplotlib/seaborn, save with a unique uuid filename to the 'images/{image_output_dir}' folder, then call plt.close() to free memory.
 - Print ALL results so they appear in the output.
 - Write as a single executable block — no functions, no classes.
 - Do NOT include ```python fences or any explanation — just the code.
@@ -148,7 +153,7 @@ Analysis Output: {execution_results}
 Report must include:
 1. ## Summary — 2-3 sentences answering the question directly.
 2. ## Key Findings — bullet points with specific numbers from the output.
-3. ## Charts — if any chart images were saved, reference them like: ![title](images/filename.png)
+3. ## Charts — if any chart images were saved, reference them like: ![title](images/{image_output_dir}/filename.png)
 4. ## Recommendations — 2-3 actionable insights.
 
 Format as clean markdown. Do NOT wrap in ```markdown fences.
@@ -163,7 +168,7 @@ Error message: {error_msg}
 Rules:
 - Use only pandas, matplotlib, seaborn.
 - Handle missing values before all operations.
-- Save charts to 'images/' folder with uuid filenames.
+- Save charts to 'images/{image_output_dir}' folder with uuid filenames.
 - Output ONLY the corrected Python code — no explanation, no markdown fences.
 """
 
@@ -305,7 +310,7 @@ def generate_python_code(state: AgentState) -> AgentState:
     # Combine the rephrased query with code-writing instructions
     full_query = (
         f"{state['rephrased_query']}\n\n"
-        f"Include numerical analysis AND at least one chart saved to 'images/' folder.\n"
+        f"Include numerical analysis AND at least one chart saved to 'images/{state['image_output_dir']}' folder.\n"
         f"Print all computed results clearly."
     )
 
@@ -319,6 +324,7 @@ def generate_python_code(state: AgentState) -> AgentState:
         "df_head": df_head,
         "df_columns": state["column_description"],
         "rephrased_query": full_query,
+        "image_output_dir": state["image_output_dir"],
     })
 
     return {
@@ -388,7 +394,7 @@ def execute_python_code(state: AgentState) -> AgentState:
     repl = PythonAstREPLTool(locals={"df": df, "pd": pd})
 
     # Make sure charts have somewhere to be saved
-    os.makedirs("images", exist_ok=True)
+    os.makedirs(os.path.join("images", state["image_output_dir"]), exist_ok=True)
 
     try:
         results = repl.run(code)
@@ -439,11 +445,17 @@ def re_generate_python_code(state: AgentState) -> AgentState:
         error_msg = "Unknown error"
 
     prompt = ChatPromptTemplate.from_messages([
-        SystemMessage(content=CODE_FIX_SYSTEM.format(error_type=error_type, error_msg=error_msg)),
+        SystemMessage(content=CODE_FIX_SYSTEM.format(
+            error_type=error_type, 
+            error_msg=error_msg,
+            image_output_dir=state["image_output_dir"]
+        )),
         HumanMessage(content=f"Previous code:\n{state.get('Python_Code', '')}\n\nFix the {error_type} issue."),
     ])
     chain = prompt | _get_llm() | StrOutputParser()
-    new_code = call_llm_with_retry(chain, {})
+    new_code = call_llm_with_retry(chain, {
+        "image_output_dir": state["image_output_dir"]
+    })
 
     return {
         "Python_Code": new_code,
@@ -479,6 +491,7 @@ def generate_report(state: AgentState) -> AgentState:
         "execution_results": state["execution_results"],
         "df_columns": state["column_description"],
         "df_head": df_head,
+        "image_output_dir": state["image_output_dir"],
     })
 
     return {"reports": report}
