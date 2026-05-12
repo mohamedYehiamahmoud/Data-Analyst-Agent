@@ -126,3 +126,4 @@ class AgentState(TypedDict):
     _terminate_workflow: Optional[bool]    # Signals the graph to stop early
     conversation_history: Optional[str]   # Memory injection
     image_output_dir: Optional[str]       # Session-specific directory for images
+    domain: Optional[str]
