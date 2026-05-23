@@ -47,6 +47,10 @@ from dotenv import load_dotenv
 load_dotenv()
 
 import pandas as pd
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import seaborn as sns
 from groq import RateLimitError
 from langchain_core.messages import SystemMessage, HumanMessage
 from langchain_core.output_parsers import StrOutputParser
@@ -299,8 +303,20 @@ def execute_python_code(state: AgentState) -> AgentState:
     code = state["Python_Code"]
     df = state["data_frame"]
 
-    repl = PythonAstREPLTool(locals={"df": df, "pd": pd})
-    os.makedirs(os.path.join("images", state["image_output_dir"]), exist_ok=True)
+    images_folder = os.path.join("images", state["image_output_dir"])
+    os.makedirs(images_folder, exist_ok=True)
+
+    # FIX: pass matplotlib, seaborn, uuid, and os into the sandbox
+    # so the generated code can save charts correctly.
+    sandbox_locals = {
+        "df":   df,
+        "pd":   pd,
+        "plt":  plt,
+        "sns":  sns,
+        "uuid": uuid,
+        "os":   os,
+    }
+    repl = PythonAstREPLTool(locals=sandbox_locals)
 
     try:
         results = repl.run(code)
