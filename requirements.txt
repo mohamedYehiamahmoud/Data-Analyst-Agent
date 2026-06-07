@@ -1,0 +1,32 @@
+# Core framework
+fastapi
+uvicorn[standard]
+
+# LLM & Agent framework
+langgraph
+langchain
+langchain-groq
+langchain-core
+langchain-experimental
+groq
+
+# Data & visualization
+pandas
+bleach
+matplotlib
+seaborn
+tabulate    # for df.to_markdown()
+
+# Validation & settings
+pydantic
+pydantic-settings
+
+# Utilities
+python-dotenv
+python-multipart   # for FastAPI file uploads
+aiofiles
+
+# Testing
+pytest
+pytest-asyncio
+httpx              # async test client for FastAPI
