@@ -37,6 +37,8 @@ The LangGraph workflow looks like this:
 """
 
 import os
+import io
+import sys
 import time
 import logging
 import uuid
@@ -259,7 +261,7 @@ def generate_python_code(state: AgentState) -> AgentState:
         "rephrased_query": full_query,
         "image_output_dir": state["image_output_dir"],
     })
-    logger.info(f"Generated code:\n{code[:500]}")
+    logger.info(f"Generated code:\n{code}")
     
     
     return {
@@ -418,13 +420,13 @@ def inject_print_statements(code: str) -> str:
 
 def execute_python_code(state: AgentState) -> AgentState:
     logger.info("NODE: execute_python_code")
-
+ 
     code = state["Python_Code"]
     df = state["data_frame"]
-
+ 
     images_folder = os.path.join("images", state["image_output_dir"])
     os.makedirs(images_folder, exist_ok=True)
-
+ 
     # FIX: pass matplotlib, seaborn, uuid, and os into the sandbox
     # so the generated code can save charts correctly.
     sandbox_locals = {
@@ -435,46 +437,65 @@ def execute_python_code(state: AgentState) -> AgentState:
         "uuid": uuid,
         "os":   os,
     }
+ 
+    # Keep PythonAstREPLTool for its AST-based security checks (it parses the code
+    # with ast.parse and sanitize_input before any exec happens).
+    #
+    # The stdout capture problem: repl._run() only wraps the LAST statement in
+    # redirect_stdout — all earlier statements are exec()'d with no capture at all.
+    # Fix: redirect sys.stdout to our own buffer BEFORE calling repl.run().
+    #   - All-but-last statements write to sys.stdout → land in our _buf.
+    #   - The last statement is wrapped by repl in its own redirect_stdout(io_buffer),
+    #     and its return value comes back as the string returned by repl.run().
+    # We then combine both to get the complete output.
     repl = PythonAstREPLTool(locals=sandbox_locals)
-
-    # Auto-inject print() around any pandas result assignments the LLM forgot to print.
-    # This is the root cause of 'not available' reports — the code runs fine but
-    # produces no stdout, so the report node has nothing to quote.
+ 
     code = inject_print_statements(code)
-    logger.info(f"Code after print injection:\n{code[:500]}")
-
+    logger.info(f"Code after print injection:\n{code}")
+ 
+    _buf = io.StringIO()
+    _old_stdout = sys.stdout
+    sys.stdout = _buf
     try:
-        results = repl.run(code)
-        logger.info(f"results:\n{results}")
-        # Real traceback → retry with error message
-        if check_execution_output(results):
-            return {"execution_error": results, "execution_results": None}
-
-        # Empty output means the LLM forgot to print() its results.
-        # Treat this as a soft error so re_generate_python_code fixes it.
-        #if not results or not results.strip():
-        results_text = results if results else ""
-        logger.info(f"results_text:\n{results_text}")
-        if not results_text.strip():
-            logger.warning("Code produced no printed output — triggering retry.")
-            return {
-                "execution_error": (
-                    "NO_OUTPUT: The code ran without errors but printed nothing. "
-                    "Every computed result (groupby, mean, value_counts, etc.) "
-                    "MUST be printed with print(). Add print() around every result variable."
-                ),
-                "execution_results": None,
-            }
-
+        last_line_result = repl.run(code)
+    finally:
+        sys.stdout = _old_stdout
+ 
+    # _buf holds output from all-but-last statements.
+    # last_line_result holds whatever the last statement printed or returned.
+    mid_output = _buf.getvalue()
+    last_output = last_line_result if isinstance(last_line_result, str) else ""
+ 
+    # Avoid duplicating if repl already included mid_output in its return
+    if last_output and last_output not in mid_output:
+        results_text = mid_output + last_output
+    else:
+        results_text = mid_output or last_output
+ 
+    logger.info(f"results:\n{results_text}")
+ 
+    # Traceback in output → code failed, ask LLM to fix
+    if check_execution_output(results_text):
+        return {"execution_error": results_text, "execution_results": None}
+ 
+    # No output at all → LLM forgot to print(), trigger retry
+    if not results_text.strip():
+        logger.warning("Code produced no printed output — triggering retry.")
         return {
-            "execution_results": results_text,
-            "execution_error": None,
+            "execution_error": (
+                "NO_OUTPUT: The code ran without errors but printed nothing. "
+                "Every computed result (groupby, mean, value_counts, etc.) "
+                "MUST be printed with print(). Add print() around every result variable."
+            ),
+            "execution_results": None,
         }
-    except Exception as e:
-        logger.error(f"Code execution error: {e}")
-        return {"execution_error": str(e), "execution_results": None}
-
-
+ 
+    logger.info(f"results_text:\n{results_text}")
+    return {
+        "execution_results": results_text,
+        "execution_error": None,
+    }
+    
 def re_generate_python_code(state: AgentState) -> AgentState:
     logger.info("NODE: re_generate_python_code")
 
